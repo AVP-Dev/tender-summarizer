@@ -24,7 +24,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 
 
 class LlmError(RuntimeError):
@@ -72,37 +72,50 @@ async def _summarize_ollama(full_prompt: str) -> str:
 
 
 async def _summarize_nvidia(full_prompt: str) -> str:
+    """Call NVIDIA NIM via the OpenAI-compatible SDK.
+
+    The default model (nemotron-3.5-lightning) is a reasoning model: its
+    thinking trace comes back separately as `reasoning_content` on each
+    streamed delta, while the actual answer is in `content`. We only need
+    the final answer for JSON extraction, so we stream internally but
+    discard reasoning_content and concatenate only content chunks.
+    """
     if not NVIDIA_API_KEY:
         raise LlmError(
             "NVIDIA_API_KEY is not set. Get a free key at build.nvidia.com "
             "and export it, or switch LLM_PROVIDER back to 'ollama'."
         )
 
-    payload = {
-        "model": NVIDIA_MODEL,
-        "messages": [{"role": "user", "content": full_prompt}],
-        "temperature": 0.1,
-        "max_tokens": 1024,
-    }
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    # Imported lazily so `openai` is only required when this provider is used.
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
 
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{NVIDIA_BASE_URL}/chat/completions", json=payload, headers=headers
-            )
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
+        stream = await client.chat.completions.create(
+            model=NVIDIA_MODEL,
+            messages=[{"role": "user", "content": full_prompt}],
+            temperature=0.1,
+            top_p=0.95,
+            max_tokens=4096,
+            extra_body={
+                "chat_template_kwargs": {"enable_thinking": True},
+                "reasoning_budget": 4096,
+            },
+            stream=True,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+
+        content_parts: list[str] = []
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+        return "".join(content_parts).strip()
+    except Exception as exc:  # openai SDK raises its own exception hierarchy
         raise LlmError(f"NVIDIA NIM request failed: {exc}") from exc
-
-    data = response.json()
-    try:
-        return data["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError) as exc:
-        raise LlmError(f"Unexpected NVIDIA NIM response shape: {data!r}") from exc
 
 
 def build_extraction_prompt() -> str:
