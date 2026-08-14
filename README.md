@@ -20,8 +20,6 @@ LLM-модели; результат возвращается в виде чел
 - [uv](https://docs.astral.sh/uv/) — рекомендуется для управления окружением
 - Для провайдера Ollama — установленный и запущенный [Ollama](https://ollama.com)
 - Для облачных провайдеров — API-ключ соответствующего сервиса
-- Для обработки сканированных PDF — [Tesseract](https://github.com/tesseract-ocr/tesseract):
-  `brew install tesseract tesseract-lang`
 
 ## Установка
 
@@ -186,8 +184,6 @@ pytest
 
 ## Ограничения
 
-- Для обработки сканированных PDF требуется установленный Tesseract
-  (`brew install tesseract tesseract-lang`)
 - Аутентификация и rate-limiting отсутствуют — сервис предназначен для
   локального использования
 
