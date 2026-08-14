@@ -20,7 +20,10 @@ LLM-модели; результат возвращается в виде чел
 - [uv](https://docs.astral.sh/uv/) — рекомендуется для управления окружением
 - Для провайдера Ollama — установленный и запущенный [Ollama](https://ollama.com)
 - Для облачных провайдеров — API-ключ соответствующего сервиса
-- Для обработки сканированных PDF — `brew install tesseract tesseract-lang`
+- Для обработки сканированных PDF — Tesseract (системная установка):
+  `brew install tesseract tesseract-lang`. pytesseract — Python-обёртка,
+  устанавливается через pip в venv; бинарник Tesseract ставится brew
+  системно и вызывается из venv как внешняя программа.
 
 ## Установка
 
