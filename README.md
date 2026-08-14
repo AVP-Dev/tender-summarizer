@@ -52,6 +52,12 @@ uvicorn app.main:app --reload
 
 ### Запрос
 
+Через браузер: откройте **http://localhost:8000/** — простая страница с
+drag&drop загрузкой PDF и результатом на странице. Для API-тестирования
+есть автосгенерированный Swagger на **http://localhost:8000/docs**.
+
+Через curl:
+
 ```bash
 curl -F "file=@tender.pdf" http://localhost:8000/summarize
 ```
@@ -92,10 +98,12 @@ pytest
 ```
 app/
   main.py          # FastAPI-эндпоинты
+  web_ui.py         # drag&drop HTML-страница для ручного тестирования
   pdf_reader.py    # извлечение текста из PDF
   llm_client.py    # вызов Ollama / NVIDIA NIM, парсинг JSON-ответа
   schemas.py       # Pydantic-модели ответа
 tests/
   test_llm_client.py
   test_provider_selection.py
+  test_web_ui.py
 ```
