@@ -1,33 +1,55 @@
 import pytest
 
-from app.llm_client import LlmError, parse_llm_json
+from app.llm_client import build_extraction_prompt, summarize
 
 
-def test_parse_clean_json():
-    raw = '{"contract_amount": "1 200 000 руб.", "deadlines": "60 дней", "key_requirements": ["опыт от 3 лет"], "penalties": ["0.1% в день"]}'
-    result = parse_llm_json(raw)
-    assert result["contract_amount"] == "1 200 000 руб."
-    assert result["key_requirements"] == ["опыт от 3 лет"]
+def test_prompt_asks_for_readable_sections():
+    prompt = build_extraction_prompt()
+    assert "Сумма контракта" in prompt
+    assert "Сроки выполнения" in prompt
+    assert "Ключевые требования" in prompt
+    assert "Штрафы и санкции" in prompt
 
 
-def test_parse_json_wrapped_in_markdown_fence():
-    raw = '```json\n{"contract_amount": null, "deadlines": null, "key_requirements": [], "penalties": []}\n```'
-    result = parse_llm_json(raw)
-    assert result["contract_amount"] is None
-    assert result["key_requirements"] == []
+@pytest.mark.anyio
+async def test_summarize_ollama_uses_provided_host_and_model(monkeypatch):
+    """summarize() should send the request to the given host/model."""
+    captured = {}
 
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
 
-def test_parse_json_with_leading_trailing_text():
-    raw = 'Вот результат анализа:\n{"contract_amount": "500000", "deadlines": "30 дней", "key_requirements": [], "penalties": []}\nНадеюсь, это поможет!'
-    result = parse_llm_json(raw)
-    assert result["contract_amount"] == "500000"
+        def json(self):
+            return {"response": "ok"}
 
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
 
-def test_parse_invalid_json_raises_llm_error():
-    with pytest.raises(LlmError):
-        parse_llm_json("это вообще не json")
+        async def __aenter__(self):
+            return self
 
+        async def __aexit__(self, *exc):
+            return False
 
-def test_parse_empty_string_raises_llm_error():
-    with pytest.raises(LlmError):
-        parse_llm_json("")
+        async def post(self, url, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await summarize(
+        "текст документа",
+        "инструкция",
+        provider="ollama",
+        host="http://192.168.1.5:11434",
+        model="llama3.2:3b",
+    )
+    assert result == "ok"
+    assert captured["url"] == "http://192.168.1.5:11434/api/generate"
+    assert captured["json"]["model"] == "llama3.2:3b"
+    assert "инструкция" in captured["json"]["prompt"]

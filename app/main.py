@@ -1,29 +1,21 @@
 """Tender document summarizer.
 
 Upload a PDF downloaded from a government procurement portal, get back a
-structured JSON summary: contract amount, deadlines, key requirements,
-and penalties. Runs entirely against a local Ollama model by default —
-no external API key required, no document data leaves the machine.
-
-Run locally:
-    ollama pull llama3.1:8b
-    ollama serve
-    uvicorn app.main:app --reload
-
-Then:
-    curl -F "file=@tender.pdf" http://localhost:8000/summarize
+human-readable summary: contract amount, deadlines, key requirements,
+and penalties. The LLM backend (Ollama / NVIDIA NIM / DeepSeek) can be
+chosen in the web UI.
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from app.llm_client import LlmError, build_extraction_prompt, parse_llm_json, summarize
+from app.llm_client import LlmError, build_extraction_prompt, summarize
 from app.pdf_reader import EmptyPdfError, extract_text
-from app.schemas import SummaryResponse, TenderSummary
+from app.schemas import SummaryResponse
 from app.web_ui import INDEX_HTML
 
 logging.basicConfig(level=logging.INFO)
@@ -32,8 +24,8 @@ logger = logging.getLogger("tender_summarizer")
 app = FastAPI(
     title="Tender Document Summarizer",
     description="Extracts contract amount, deadlines, requirements and "
-    "penalties from tender PDFs using a local LLM.",
-    version="0.1.0",
+    "penalties from tender PDFs using an LLM.",
+    version="0.2.0",
 )
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -55,8 +47,27 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+        '<rect width="32" height="32" rx="6" fill="#2563eb"/>'
+        '<text x="16" y="23" font-size="20" font-weight="bold" '
+        'text-anchor="middle" fill="white" font-family="system-ui">T</text>'
+        '</svg>'
+    )
+    return Response(content=svg.encode(), media_type="image/svg+xml")
+
+
 @app.post("/summarize", response_model=SummaryResponse)
-async def summarize_tender(file: UploadFile = File(...)) -> SummaryResponse:
+async def summarize_tender(
+    file: UploadFile = File(...),
+    provider: str = Form(default="ollama"),
+    model: str = Form(default=""),
+    api_key: str = Form(default=""),
+    base_url: str = Form(default=""),
+    host: str = Form(default=""),
+) -> SummaryResponse:
     if file.content_type not in ("application/pdf", "application/x-pdf"):
         raise HTTPException(
             status_code=400,
@@ -74,15 +85,24 @@ async def summarize_tender(file: UploadFile = File(...)) -> SummaryResponse:
 
     prompt = build_extraction_prompt()
 
+    logger.info("summarize: provider=%s model=%s has_key=%s", provider, model or "(default)", bool(api_key))
+
     try:
-        raw_response = await summarize(document_text, prompt)
-        parsed = parse_llm_json(raw_response)
+        summary_text = await summarize(
+            document_text,
+            prompt,
+            provider=provider,
+            model=model or None,
+            api_key=api_key or None,
+            base_url=base_url or None,
+            host=host or None,
+        )
+        logger.info("summarize: done, %d chars", len(summary_text))
     except LlmError as exc:
         logger.error("LLM summarization failed for %s: %s", file.filename, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    summary = TenderSummary(**parsed)
-    return SummaryResponse(filename=file.filename or "unknown.pdf", summary=summary)
+    return SummaryResponse(filename=file.filename or "unknown.pdf", summary=summary_text)
 
 
 @app.exception_handler(Exception)

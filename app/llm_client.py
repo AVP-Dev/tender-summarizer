@@ -1,22 +1,22 @@
 """LLM client abstraction.
 
-Supports two zero-cost backends, selected via LLM_PROVIDER:
-  - "ollama" (default): fully local, no API key, no data leaves the machine.
-  - "nvidia": NVIDIA NIM free-tier API (OpenAI-compatible), useful when no
-    local GPU is available — free API key from build.nvidia.com.
+Supports several backends, chosen per-request by the API client:
+  - "ollama": fully local, no API key, no data leaves the machine.
+  - "nvidia": NVIDIA NIM API (OpenAI-compatible), free key from
+    build.nvidia.com — default model stepfun-ai/step-3.7-flash
+    (multilingual, supports Russian).
+  - "deepseek": DeepSeek API (OpenAI-compatible, api.deepseek.com).
 
-Paid providers (OpenAI/Anthropic) are intentionally not wired in: the task
-allows any of the three, and both free options avoid billing entirely.
+Environment variables provide defaults; the web UI can override them
+per request (provider, model, API key, Ollama host).
 """
 
 from __future__ import annotations
 
-import json
 import os
 
 import httpx
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -24,19 +24,35 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "stepfun-ai/step-3.7-flash")
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-ai/deepseek-v4-flash")
 
 
 class LlmError(RuntimeError):
     """Raised when the LLM backend is unreachable or returns an error."""
 
 
-async def summarize(document_text: str, prompt: str) -> str:
-    """Send the document text + instruction prompt to the configured backend.
+async def summarize(
+    document_text: str,
+    prompt: str,
+    *,
+    provider: str = "ollama",
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    host: str | None = None,
+) -> str:
+    """Send the document text + instruction prompt to the chosen backend.
 
     Truncates very long documents defensively — most tender packages have
     the commercially relevant terms in the first several thousand tokens,
     and smaller models have limited context windows.
+
+    provider: "ollama" | "nvidia" | "deepseek". model/api_key/base_url/host
+    optionally override the environment defaults (the web UI sends them).
     """
     max_chars = 24_000
     if len(document_text) > max_chars:
@@ -44,82 +60,110 @@ async def summarize(document_text: str, prompt: str) -> str:
 
     full_prompt = f"{prompt}\n\n---\nДОКУМЕНТ:\n{document_text}"
 
-    if LLM_PROVIDER == "nvidia":
-        return await _summarize_nvidia(full_prompt)
-    return await _summarize_ollama(full_prompt)
+    if provider == "nvidia" or provider == "deepseek":
+        return await _summarize_openai_compatible(
+            full_prompt,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+    return await _summarize_ollama(full_prompt, host=host, model=model)
 
 
-async def _summarize_ollama(full_prompt: str) -> str:
+async def _summarize_ollama(
+    full_prompt: str,
+    *,
+    host: str | None = None,
+    model: str | None = None,
+) -> str:
+    ollama_host = host or OLLAMA_HOST
+    ollama_model = model or OLLAMA_MODEL
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": ollama_model,
         "prompt": full_prompt,
         "stream": False,
         "options": {"temperature": 0.1},
     }
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
+            response = await client.post(f"{ollama_host}/api/generate", json=payload)
             response.raise_for_status()
     except httpx.HTTPError as exc:
         raise LlmError(
-            f"Could not reach Ollama at {OLLAMA_HOST}. "
+            f"Could not reach Ollama at {ollama_host}. "
             f"Make sure `ollama serve` is running and the model "
-            f"`{OLLAMA_MODEL}` is pulled (`ollama pull {OLLAMA_MODEL}`)."
+            f"`{ollama_model}` is pulled (`ollama pull {ollama_model}`)."
         ) from exc
 
     data = response.json()
     return data.get("response", "").strip()
 
 
-async def _summarize_nvidia(full_prompt: str) -> str:
-    """Call NVIDIA NIM via the OpenAI-compatible SDK.
+async def _summarize_openai_compatible(
+    full_prompt: str,
+    *,
+    provider: str,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Call an OpenAI-compatible endpoint (NVIDIA NIM / DeepSeek) via httpx.
 
-    The default model (nemotron-3.5-lightning) is a reasoning model: its
-    thinking trace comes back separately as `reasoning_content` on each
-    streamed delta, while the actual answer is in `content`. We only need
-    the final answer for JSON extraction, so we stream internally but
-    discard reasoning_content and concatenate only content chunks.
+    Each provider has its own defaults: API key, base URL and model are
+    never shared between providers. Plain non-streaming call with
+    explicit timeout.
     """
-    if not NVIDIA_API_KEY:
+    if provider == "deepseek":
+        key = api_key if api_key is not None else DEEPSEEK_API_KEY
+        url = (base_url or DEEPSEEK_BASE_URL).rstrip("/") + "/chat/completions"
+        model_name = model or DEEPSEEK_MODEL
+    else:
+        key = api_key if api_key is not None else NVIDIA_API_KEY
+        url = (base_url or NVIDIA_BASE_URL).rstrip("/") + "/chat/completions"
+        model_name = model or NVIDIA_MODEL
+
+    if not key:
         raise LlmError(
-            "NVIDIA_API_KEY is not set. Get a free key at build.nvidia.com "
-            "and export it, or switch LLM_PROVIDER back to 'ollama'."
+            f"API key is required for provider '{provider}'. "
+            "Get a key at the provider's site, paste it in the web UI, "
+            "or switch to the local Ollama option."
         )
 
-    # Imported lazily so `openai` is only required when this provider is used.
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": full_prompt}],
+        "temperature": 0.1,
+        "top_p": 0.95,
+        "max_tokens": 16384,
+        "seed": 42,
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
 
     try:
-        stream = await client.chat.completions.create(
-            model=NVIDIA_MODEL,
-            messages=[{"role": "user", "content": full_prompt}],
-            temperature=0.1,
-            top_p=0.95,
-            max_tokens=4096,
-            extra_body={
-                "chat_template_kwargs": {"enable_thinking": True},
-                "reasoning_budget": 4096,
-            },
-            stream=True,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS)) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+    except httpx.TimeoutException:
+        raise LlmError(f"{provider} request timed out after {REQUEST_TIMEOUT_SECONDS}s.")
+    except httpx.HTTPStatusError as exc:
+        raise LlmError(f"{provider} returned HTTP {exc.response.status_code}: {exc.response.text[:300]}") from exc
+    except httpx.HTTPError as exc:
+        raise LlmError(f"{provider} request failed: {exc}") from exc
 
-        content_parts: list[str] = []
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                content_parts.append(delta.content)
-        return "".join(content_parts).strip()
-    except Exception as exc:  # openai SDK raises its own exception hierarchy
-        raise LlmError(f"NVIDIA NIM request failed: {exc}") from exc
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        raise LlmError(f"{provider} returned empty content. Raw: {data}")
+    return content.strip()
 
 
 def build_extraction_prompt() -> str:
-    """Instruction prompt asking for a strict JSON summary.
+    """Instruction prompt asking for a human-readable summary.
 
     Kept as a plain string (not an f-string template scattered across the
     codebase) so it's easy to iterate on prompt wording during testing
@@ -127,39 +171,12 @@ def build_extraction_prompt() -> str:
     """
     return (
         "Ты помощник, который анализирует документацию по государственным "
-        "тендерам. Внимательно прочитай документ ниже и верни ТОЛЬКО валидный "
-        "JSON (без markdown-разметки, без пояснений до или после) со следующими "
-        "полями:\n"
-        '{\n'
-        '  "contract_amount": "сумма контракта с валютой, или null если не указана",\n'
-        '  "deadlines": "сроки выполнения работ, или null",\n'
-        '  "key_requirements": ["список ключевых требований к исполнителю"],\n'
-        '  "penalties": ["список штрафов и санкций за нарушение условий"]\n'
-        "}\n\n"
-        "Если какое-то поле невозможно найти в тексте — используй null или "
-        "пустой список, не придумывай данные."
+        "тендерам. Внимательно прочитай документ ниже и составь краткую "
+        "структурированную выжимку на русском языке. Используй такие разделы:\n\n"
+        "1. Сумма контракта\n"
+        "2. Сроки выполнения\n"
+        "3. Ключевые требования к исполнителю\n"
+        "4. Штрафы и санкции\n\n"
+        "Пиши короткими тезисами, по делу, без воды. Если какой-то информации "
+        "в документе нет — так и напиши «не указано», не выдумывай данные."
     )
-
-
-def parse_llm_json(raw_response: str) -> dict:
-    """Parse the model's response into a dict, tolerating minor formatting noise.
-
-    Local models sometimes wrap JSON in ```json fences or add stray text
-    despite instructions. This strips the common cases before failing loudly.
-    """
-    cleaned = raw_response.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
-        raise LlmError(f"Model did not return JSON. Raw response: {raw_response!r}")
-
-    try:
-        return json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise LlmError(f"Could not parse model JSON: {exc}. Raw: {raw_response!r}") from exc

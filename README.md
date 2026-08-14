@@ -1,109 +1,194 @@
 # Tender Document Summarizer
 
-Небольшой сервис на FastAPI: принимает PDF тендерной документации,
-извлекает текст и с помощью LLM возвращает структурированную выжимку —
-сумму контракта, сроки, ключевые требования к исполнителю и штрафы.
+Сервис на FastAPI для извлечения структурированной выжимки из PDF-документов
+тендерной документации: сумма контракта, сроки выполнения, требования
+к исполнителю и штрафные санкции. Текст извлекается из PDF и передаётся
+LLM-модели; результат возвращается в виде человекочитаемого текста на русском.
 
-## Почему так
+## Возможности
 
-Задача допускает три варианта LLM-бэкенда: OpenAI, Anthropic или
-локальную бесплатную модель. Выбраны два бесплатных пути без биллинга —
-**Ollama** (полностью локально, данные не покидают машину) и
-**NVIDIA NIM** (бесплатный API-ключ, если локального GPU нет под рукой).
-Платные API намеренно не подключены — для тестового задания это не нужно.
+- Загрузка PDF через веб-интерфейс (drag&drop) или HTTP API
+- Три LLM-провайдера: Ollama (локально), NVIDIA NIM, DeepSeek
+- Выбор провайдера, модели и API-ключа без изменения конфигурации
+- Ограничение размера файла (20 МБ) и таймаут LLM-запроса
+- История запросов в веб-интерфейсе (в рамках сессии браузера)
 
-- **Парсинг PDF вынесен в отдельный модуль** (`app/pdf_reader.py`), не
-  завязан на FastAPI — если понадобится OCR-фолбэк для сканов, это
-  отдельная точка расширения, не переписывание API-слоя.
-- **Промпт живёт отдельной функцией** (`build_extraction_prompt`), не
-  размазан по коду — с ним проще итерировать при тестировании на реальных
-  документах.
-- **Ответ модели парсится защитным образом** (`parse_llm_json`): модели
-  иногда оборачивают JSON в markdown-фenced блоки или добавляют пояснения
-  до/после — это не должно ломать эндпоинт.
+## Требования
 
-## Быстрый старт
+- Python 3.10–3.12 (синтаксис `str | None`; pydantic 2.9 не собирается
+  на Python 3.14)
+- [uv](https://docs.astral.sh/uv/) — рекомендуется для управления окружением
+- Для провайдера Ollama — установленный и запущенный [Ollama](https://ollama.com)
+- Для облачных провайдеров — API-ключ соответствующего сервиса
 
-### Вариант 1: локально через Ollama
+## Установка
+
+```bash
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+cp .env.example .env
+```
+
+## Запуск
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+> На macOS не используйте `uvicorn` напрямую — multiprocessing spawn
+> может подхватить системный Python вместо venv. Запуск через
+> `python -m uvicorn` гарантирует использование интерпретатора из
+> активированного окружения.
+
+После запуска:
+
+| Ресурс | Адрес |
+| --- | --- |
+| Веб-интерфейс | http://localhost:8000/ |
+| Swagger UI (документация API) | http://localhost:8000/docs |
+| Health check | http://localhost:8000/health |
+
+## LLM-провайдеры
+
+Провайдер выбирается в веб-интерфейсе или передаётся параметром запроса.
+Параметры каждого провайдера настраиваются независимо.
+
+| Провайдер | Значение `provider` | Ключ API | Base URL по умолчанию | Модель по умолчанию |
+| --- | --- | --- | --- | --- |
+| Ollama (локально) | `ollama` | не требуется | `http://localhost:11434` | `llama3.1:8b` |
+| NVIDIA NIM | `nvidia` | [build.nvidia.com](https://build.nvidia.com) | `https://integrate.api.nvidia.com/v1` | `stepfun-ai/step-3.7-flash` |
+| DeepSeek | `deepseek` | [platform.deepseek.com](https://platform.deepseek.com) | `https://api.deepseek.com` | `deepseek-ai/deepseek-v4-flash` |
+
+### Ollama
 
 ```bash
 ollama pull llama3.1:8b
 ollama serve
 ```
 
+Если Ollama запущен на другой машине или порту, укажите адрес в поле
+«Адрес» веб-интерфейса или через переменную `OLLAMA_HOST`.
+
+### NVIDIA NIM
+
+Получите бесплатный ключ на https://build.nvidia.com и вставьте его
+в веб-интерфейсе при выборе провайдера NVIDIA NIM.
+
+### DeepSeek
+
+Получите ключ на https://platform.deepseek.com и вставьте его
+в веб-интерфейсе при выборе провайдера DeepSeek.
+
+API-ключи, введённые в веб-интерфейсе, передаются серверу только в момент
+запроса и не сохраняются на диск.
+
+## Конфигурация
+
+Переменные окружения задают значения по умолчанию; параметры запроса
+и веб-интерфейса имеют приоритет.
+
+| Переменная | По умолчанию | Описание |
+| --- | --- | --- |
+| `OLLAMA_HOST` | `http://localhost:11434` | Адрес сервера Ollama |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Модель Ollama |
+| `NVIDIA_API_KEY` | — | Ключ API NVIDIA NIM |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Базовый URL NVIDIA NIM |
+| `NVIDIA_MODEL` | `stepfun-ai/step-3.7-flash` | Модель NVIDIA NIM |
+| `DEEPSEEK_API_KEY` | — | Ключ API DeepSeek |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | Базовый URL DeepSeek |
+| `DEEPSEEK_MODEL` | `deepseek-ai/deepseek-v4-flash` | Модель DeepSeek |
+| `LLM_TIMEOUT_SECONDS` | `120` | Таймаут запроса к LLM |
+
+## HTTP API
+
+### POST /summarize
+
+Загружает PDF-файл и возвращает выжимку, сформированную LLM.
+
+Параметры (multipart/form-data):
+
+| Параметр | Тип | Обязательный | Описание |
+| --- | --- | --- | --- |
+| `file` | file | да | PDF-файл (до 20 МБ) |
+| `provider` | string | нет | `ollama` (по умолчанию), `nvidia` или `deepseek` |
+| `model` | string | нет | Переопределяет модель провайдера |
+| `api_key` | string | нет | API-ключ облачного провайдера |
+| `base_url` | string | нет | Переопределяет base URL облачного провайдера |
+| `host` | string | нет | Переопределяет адрес Ollama |
+
+Примеры:
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # LLM_PROVIDER=ollama по умолчанию
-uvicorn app.main:app --reload
+# Ollama
+curl -F "file=@tender.pdf" -F "provider=ollama" http://localhost:8000/summarize
+
+# NVIDIA NIM
+curl -F "file=@tender.pdf" -F "provider=nvidia" \
+     -F "api_key=YOUR_NVIDIA_KEY" http://localhost:8000/summarize
+
+# DeepSeek
+curl -F "file=@tender.pdf" -F "provider=deepseek" \
+     -F "api_key=YOUR_DEEPSEEK_KEY" http://localhost:8000/summarize
 ```
 
-### Вариант 2: через NVIDIA NIM (бесплатный ключ на build.nvidia.com)
-
-Используется через официальный `openai` SDK (NIM — OpenAI-совместимый эндпоинт),
-модель по умолчанию — `nvidia/nemotron-3.5-lightning-30b-a3b` (reasoning-модель;
-её reasoning-трейс отбрасывается, в ответ идёт только финальный content).
-
-```bash
-cp .env.example .env
-# в .env: LLM_PROVIDER=nvidia, NVIDIA_API_KEY=ваш_ключ
-uvicorn app.main:app --reload
-```
-
-### Запрос
-
-Через браузер: откройте **http://localhost:8000/** — простая страница с
-drag&drop загрузкой PDF и результатом на странице. Для API-тестирования
-есть автосгенерированный Swagger на **http://localhost:8000/docs**.
-
-Через curl:
-
-```bash
-curl -F "file=@tender.pdf" http://localhost:8000/summarize
-```
-
-Ответ:
+Ответ `200 OK`:
 
 ```json
 {
   "filename": "tender.pdf",
-  "summary": {
-    "contract_amount": "1 200 000 руб.",
-    "deadlines": "60 дней с даты подписания контракта",
-    "key_requirements": ["опыт работы от 3 лет", "СРО-допуск"],
-    "penalties": ["0.1% от суммы контракта за каждый день просрочки"]
-  }
+  "summary": "1. Сумма контракта: 1 200 000 руб.\n2. Сроки выполнения: 60 дней…"
 }
+```
+
+Коды ошибок:
+
+| Код | Причина |
+| --- | --- |
+| `400` | Файл не является PDF |
+| `413` | Размер файла превышает 20 МБ |
+| `422` | Из PDF не удалось извлечь текст (например, скан без текстового слоя) |
+| `502` | Ошибка обращения к LLM-провайдеру (таймаут, неверный ключ, недоступный сервис) |
+
+### GET /health
+
+Проверка доступности сервиса.
+
+```bash
+curl http://localhost:8000/health
+```
+
+```json
+{"status": "ok"}
 ```
 
 ## Тесты
 
 ```bash
-pip install pytest
+uv pip install pytest
 pytest
 ```
 
-## Что осознанно не сделано (cut list)
+## Архитектура
 
-- **OCR для сканированных PDF** — задача про текстовые тендерные документы,
-  большинство госзакупок публикуют текстовый PDF, а не скан. OCR-пайплайн
-  увеличил бы скоуп без явной пользы для оценки задания.
-- **Множественные LLM-провайдеры через фреймворк-абстракцию** (LangChain
-  и т.п.) — два простых HTTP-клиента прозрачнее для ревью, чем ещё один
-  слой поверх HTTP.
-- **Аутентификация и rate-limiting** — не входит в условия задания.
+| Модуль | Назначение |
+| --- | --- |
+| `app/main.py` | HTTP-эндпоинты, валидация загрузки, обработка ошибок |
+| `app/pdf_reader.py` | Извлечение текста из PDF (pypdf) |
+| `app/llm_client.py` | Клиенты Ollama / NVIDIA NIM / DeepSeek, промпт, таймауты |
+| `app/schemas.py` | Pydantic-модели ответов |
+| `app/web_ui.py` | Встроенная HTML-страница веб-интерфейса |
 
-## Структура
+Разделение слоёв позволяет заменить парсер PDF (например, добавить OCR для
+сканов) или добавить нового LLM-провайдера без изменения API-слоя.
 
-```
-app/
-  main.py          # FastAPI-эндпоинты
-  web_ui.py         # drag&drop HTML-страница для ручного тестирования
-  pdf_reader.py    # извлечение текста из PDF
-  llm_client.py    # вызов Ollama / NVIDIA NIM, парсинг JSON-ответа
-  schemas.py       # Pydantic-модели ответа
-tests/
-  test_llm_client.py
-  test_provider_selection.py
-  test_web_ui.py
-```
+## Ограничения
+
+- OCR для сканированных PDF не реализован — поддерживаются только PDF
+  с текстовым слоем
+- Аутентификация и rate-limiting отсутствуют — сервис предназначен для
+  локального использования
+
+## Лицензия
+
+MIT. Подробности см. в файле [LICENSE](LICENSE).
