@@ -17,7 +17,7 @@ from pypdf import PdfReader
 
 logger = logging.getLogger(__name__)
 
-MAX_OCR_PAGES = 30
+MAX_OCR_PAGES = 10
 
 
 class EmptyPdfError(ValueError):
@@ -31,7 +31,11 @@ def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
         import easyocr
-        _ocr_reader = easyocr.Reader(["ru", "en"], gpu=False)
+        import torch
+
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        gpu = device != "cpu"
+        _ocr_reader = easyocr.Reader(["ru", "en"], gpu=gpu)
     return _ocr_reader
 
 
@@ -54,7 +58,7 @@ def _ocr_fallback(pdf_bytes: bytes) -> str:
 
     chunks: list[str] = []
     for page in pages:
-        pix = page.get_pixmap(dpi=200)
+        pix = page.get_pixmap(dpi=150)
         img_bytes = pix.tobytes("png")
         result = reader.readtext(img_bytes, detail=0)
         text = "\n".join(result).strip()
