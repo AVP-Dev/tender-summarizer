@@ -38,19 +38,25 @@ def _ocr_fallback(pdf_bytes: bytes) -> str:
         )
         return ""
 
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = doc[:MAX_OCR_PAGES]
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages = doc[:MAX_OCR_PAGES]
 
-    chunks: list[str] = []
-    for page in pages:
-        pix = page.get_pixmap(dpi=200)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        text = pytesseract.image_to_string(img, lang="rus+eng")
-        if text.strip():
-            chunks.append(text)
+        chunks: list[str] = []
+        for page in pages:
+            pix = page.get_pixmap(dpi=200)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(img, lang="rus+eng")
+            if text.strip():
+                chunks.append(text)
 
-    doc.close()
-    return "\n\n".join(chunks).strip()
+        doc.close()
+        return "\n\n".join(chunks).strip()
+    except pytesseract.TesseractNotFoundError:
+        logger.warning(
+            "Tesseract binary not found. Install it: brew install tesseract tesseract-lang"
+        )
+        return ""
 
 
 def extract_text(pdf_bytes: bytes, max_pages: int | None = None) -> str:
