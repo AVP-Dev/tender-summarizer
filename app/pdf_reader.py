@@ -5,7 +5,7 @@ can change without touching the API layer or the LLM client.
 
 Extraction order:
 1. pypdf — fast, works for PDFs with a text layer.
-2. OCR fallback (pymupdf + easyocr) — for scanned images.
+2. OCR fallback (pymupdf + pytesseract) — for scanned images.
 """
 
 from __future__ import annotations
@@ -24,49 +24,33 @@ class EmptyPdfError(ValueError):
     """Raised when a PDF has no extractable text (e.g. a scanned image)."""
 
 
-_ocr_reader = None
-
-
-def _get_ocr_reader():
-    global _ocr_reader
-    if _ocr_reader is None:
-        import easyocr
-        import torch
-
-        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-        gpu = device != "cpu"
-        _ocr_reader = easyocr.Reader(["ru", "en"], gpu=gpu)
-    return _ocr_reader
-
-
 def _ocr_fallback(pdf_bytes: bytes) -> str:
-    """Render PDF pages as images and OCR them via EasyOCR."""
+    """Render PDF pages as images and OCR them via Tesseract."""
     try:
         import fitz  # pymupdf
+        import pytesseract
+        from PIL import Image
     except ImportError:
-        logger.warning("pymupdf not installed, OCR unavailable")
+        logger.warning("OCR dependencies not installed (pymupdf, pytesseract, Pillow)")
         return ""
 
     try:
-        reader = _get_ocr_reader()
-    except ImportError:
-        logger.warning("easyocr not installed, OCR unavailable")
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages = doc[:MAX_OCR_PAGES]
+
+        chunks: list[str] = []
+        for page in pages:
+            pix = page.get_pixmap(dpi=150)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(img, lang="rus+eng")
+            if text.strip():
+                chunks.append(text)
+
+        doc.close()
+        return "\n\n".join(chunks).strip()
+    except pytesseract.TesseractNotFoundError:
+        logger.warning("Tesseract not found. Install: brew install tesseract tesseract-lang")
         return ""
-
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = doc[:MAX_OCR_PAGES]
-
-    chunks: list[str] = []
-    for page in pages:
-        pix = page.get_pixmap(dpi=150)
-        img_bytes = pix.tobytes("png")
-        result = reader.readtext(img_bytes, detail=0)
-        text = "\n".join(result).strip()
-        if text:
-            chunks.append(text)
-
-    doc.close()
-    return "\n\n".join(chunks).strip()
 
 
 def extract_text(pdf_bytes: bytes, max_pages: int | None = None) -> str:
