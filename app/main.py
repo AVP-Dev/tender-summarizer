@@ -1,0 +1,79 @@
+"""Tender document summarizer.
+
+Upload a PDF downloaded from a government procurement portal, get back a
+structured JSON summary: contract amount, deadlines, key requirements,
+and penalties. Runs entirely against a local Ollama model by default —
+no external API key required, no document data leaves the machine.
+
+Run locally:
+    ollama pull llama3.1:8b
+    ollama serve
+    uvicorn app.main:app --reload
+
+Then:
+    curl -F "file=@tender.pdf" http://localhost:8000/summarize
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+
+from app.llm_client import LlmError, build_extraction_prompt, parse_llm_json, summarize
+from app.pdf_reader import EmptyPdfError, extract_text
+from app.schemas import SummaryResponse, TenderSummary
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("tender_summarizer")
+
+app = FastAPI(
+    title="Tender Document Summarizer",
+    description="Extracts contract amount, deadlines, requirements and "
+    "penalties from tender PDFs using a local LLM.",
+    version="0.1.0",
+)
+
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/summarize", response_model=SummaryResponse)
+async def summarize_tender(file: UploadFile = File(...)) -> SummaryResponse:
+    if file.content_type not in ("application/pdf", "application/x-pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected a PDF file, got content-type={file.content_type!r}",
+        )
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 20 MB).")
+
+    try:
+        document_text = extract_text(pdf_bytes)
+    except EmptyPdfError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    prompt = build_extraction_prompt()
+
+    try:
+        raw_response = await summarize(document_text, prompt)
+        parsed = parse_llm_json(raw_response)
+    except LlmError as exc:
+        logger.error("LLM summarization failed for %s: %s", file.filename, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    summary = TenderSummary(**parsed)
+    return SummaryResponse(filename=file.filename or "unknown.pdf", summary=summary)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled error")
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
