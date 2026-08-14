@@ -40,6 +40,10 @@ uvicorn app.main:app --reload
 
 ### Вариант 2: через NVIDIA NIM (бесплатный ключ на build.nvidia.com)
 
+Используется через официальный `openai` SDK (NIM — OpenAI-совместимый эндпоинт),
+модель по умолчанию — `nvidia/nemotron-3.5-lightning-30b-a3b` (reasoning-модель;
+её reasoning-трейс отбрасывается, в ответ идёт только финальный content).
+
 ```bash
 cp .env.example .env
 # в .env: LLM_PROVIDER=nvidia, NVIDIA_API_KEY=ваш_ключ
