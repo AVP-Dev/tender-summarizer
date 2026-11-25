@@ -194,3 +194,9 @@ pytest
 ## Лицензия
 
 MIT. Подробности см. в файле [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+<sub>AVPdev · Software Development &amp; Automation · <a href="https://avpdev.com/">avpdev.com</a></sub>
+</div>
